@@ -27,10 +27,12 @@ announcer:
                          # several seconds; we break as soon as it starts)
   announce_timeout: 45   # hard cap on a single spoken message
   settle_seconds: 0.4    # brief pause before restore so Sonos settles
-  duck_settle_seconds: 0.7  # pause after snapshot and after ducking so the
-                            # async volume_set lands before audio plays (and the
-                            # snapshot captures the true, un-ducked volume) --
-                            # the reason the old HA automation needed a 1s delay
+  duck_settle_seconds: 0.7  # MAX wait for an async volume_set to be confirmed
+                            # by HA before proceeding (we poll and continue as
+                            # soon as the new level is reported -- usually well
+                            # under this). Ensures the duck lands before audio
+                            # plays and the snapshot captures the true volume;
+                            # this is what the old HA automation's 1s delay did.
 
   # ======================================================================
   # Chime (played BEFORE the spoken text)

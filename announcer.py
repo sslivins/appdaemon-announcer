@@ -239,11 +239,10 @@ class Announcer(hass.Hass):
             if self.duck_settle:  # let snapshot capture the true (un-ducked) volume
                 time.sleep(self.duck_settle)
         try:
-            # 2) duck to the announcement volume
-            self.call_service("media_player/volume_set", entity_id=speakers,
-                              volume_level=volume)
-            if self.duck_settle:  # ensure the duck lands before any audio plays
-                time.sleep(self.duck_settle)
+            # 2) duck to the announcement volume -- poll until HA reports the new
+            #    level so the duck has actually landed before any audio plays
+            #    (volume_set is fire-and-forget; there is no sync variant).
+            self._set_volume(speakers, volume)
 
             # 3) optional chime (failure is non-fatal -- still speak)
             if want_chime and self.chime_url:
@@ -269,15 +268,13 @@ class Announcer(hass.Hass):
             else:
                 for spk, vol in pre_volume.items():
                     if vol is not None:
-                        self.call_service("media_player/volume_set",
-                                          entity_id=spk, volume_level=vol)
+                        self._set_volume(spk, vol)
 
     def _play_chime(self, speakers, primary, base_volume):
         chime_vol = self.chime_volume if self.chime_volume is not None else base_volume
         try:
             if chime_vol != base_volume:
-                self.call_service("media_player/volume_set", entity_id=speakers,
-                                  volume_level=chime_vol)
+                self._set_volume(speakers, chime_vol)
             baseline = self._media_signature(primary)
             self.call_service("media_player/play_media", entity_id=speakers,
                               media_content_id=self.chime_url,
@@ -288,8 +285,7 @@ class Announcer(hass.Hass):
                      level="WARNING")
         finally:
             if chime_vol != base_volume:
-                self.call_service("media_player/volume_set", entity_id=speakers,
-                                  volume_level=base_volume)
+                self._set_volume(speakers, base_volume)
 
     # -- helpers -------------------------------------------------------------
     def _media_signature(self, entity):
@@ -350,6 +346,30 @@ class Announcer(hass.Hass):
             return float(value)
         except (ValueError, TypeError):
             return None
+
+    def _set_volume(self, entities, volume):
+        """Set volume and poll until HA confirms it (fire-and-forget service).
+
+        ``media_player.volume_set`` returns before the device applies the
+        change, so a blind sleep either wastes time or races the next step.
+        Instead we set it and poll ``get_state`` until every target reports the
+        target level (within a small tolerance), bounded by ``duck_settle`` --
+        confirming faster than a fixed sleep in the common case, and never
+        proceeding with the duck only half-applied.
+        """
+        targets = _as_list(entities)
+        self.call_service("media_player/volume_set", entity_id=targets,
+                          volume_level=volume)
+        deadline = time.time() + max(self.duck_settle, 0.05)
+        while time.time() < deadline and not self._stopping:
+            if all(
+                (lambda v: v is not None and abs(v - volume) <= 0.02)(
+                    self._safe_float(
+                        self.get_state(e, attribute="volume_level")))
+                for e in targets
+            ):
+                return
+            time.sleep(self._poll)
 
     def _in_quiet_hours(self):
         if not self.qh_start or not self.qh_end:
