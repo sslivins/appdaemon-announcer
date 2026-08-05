@@ -1,0 +1,95 @@
+announcer:
+  module: announcer
+  class: Announcer
+  log: announcer_log
+
+  # ======================================================================
+  # Where announcements play
+  # ======================================================================
+  # Default target speaker(s). Individual events (and announcer.say calls) can
+  # override this with their own `speakers:` list.
+  speakers:
+    - media_player.dining_room
+  # Snapshot/duck/restore the whole Sonos group the speaker is bonded to (this
+  # is what the old HA automation did with `with_group: true`).
+  duck_with_group: true
+
+  # ======================================================================
+  # Volume + timing
+  # ======================================================================
+  # Volume used while speaking a normal (non-quiet-hours) announcement.
+  announce_volume: 0.5
+  # Safety caps only -- there is NO hand-tuned announcement delay. The app
+  # restores audio the instant the speaker actually stops playing; these just
+  # bound how long it will ever wait.
+  start_timeout: 6       # max seconds to wait for playback to *begin*
+  announce_timeout: 45   # hard cap on a single spoken message
+  settle_seconds: 0.4    # brief pause before restore so Sonos settles
+
+  # ======================================================================
+  # Chime (played BEFORE the spoken text)
+  # ======================================================================
+  # The app waits for the chime to finish, then speaks -- no fixed gap. A chime
+  # failure (e.g. unreachable URL) is non-fatal: it logs and still speaks.
+  # `media_url` must be reachable BY THE SONOS (same-LAN HA `/local/...` URL or a
+  # public https URL). To host on HA: drop the file in `/config/www/` and use
+  # http://homeassistant.bdl:8123/local/<file>.
+  chime:
+    enabled: true
+    media_url: "http://homeassistant.bdl:8123/local/chime.mp3"
+    media_content_type: music
+    # volume: 0.5          # optional; defaults to announce_volume
+    timeout: 10            # max seconds to wait for the chime to finish
+
+  # ======================================================================
+  # Text-to-speech
+  # ======================================================================
+  tts:
+    engine: tts.home_assistant_cloud
+    cache: true
+
+  # ======================================================================
+  # Quiet hours
+  # ======================================================================
+  # mode: silent  -> skip the announcement entirely
+  # mode: quieter -> still play, but at `quiet_volume` (and skip the chime if
+  #                  skip_chime is true)
+  # Window may wrap past midnight (e.g. 21:30 -> 07:30). An individual event or
+  # announcer.say call can set `ignore_quiet_hours: true` to always play.
+  quiet_hours:
+    start: "21:30"
+    end: "07:30"
+    mode: quieter
+    quiet_volume: 0.2
+    skip_chime: true
+
+  # ======================================================================
+  # Generic event API
+  # ======================================================================
+  # Any app/automation can fire this event to request a ducked announcement:
+  #   event_type: announcer.say
+  #   event_data:
+  #     message: "Dinner is ready"
+  #     speakers: [media_player.kitchen]   # optional
+  #     volume: 0.6                        # optional
+  #     chime: false                       # optional
+  #     ignore_quiet_hours: true           # optional
+  say_event: announcer.say
+
+  # ======================================================================
+  # Events -- add as many trigger->message mappings as you like
+  # ======================================================================
+  events:
+    - name: laundry_complete
+      # GE Profile combo washer/dryers -- a single "Finished" per full cycle.
+      trigger:
+        entity_id:
+          - sensor.zv367575n_laundry_machine_state
+          - sensor.zv367668n_laundry_machine_state
+        to: "Finished"
+      message: "The laundry cycle has completed"
+      # Optional per-event overrides:
+      # speakers: [media_player.kitchen]
+      # volume: 0.6
+      # chime: false
+      # ignore_quiet_hours: true
