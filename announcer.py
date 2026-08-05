@@ -68,6 +68,11 @@ class Announcer(hass.Hass):
         self.start_timeout = float(self.args.get("start_timeout", 15))
         self.announce_timeout = float(self.args.get("announce_timeout", 45))
         self.settle_seconds = max(0.0, float(self.args.get("settle_seconds", 0.3)))
+        # async volume_set / snapshot need a beat to land before the next step,
+        # else the duck lands mid-speech (blasting the first word) or the
+        # snapshot captures the already-ducked volume (matches the 1s delay the
+        # old HA automation needed).
+        self.duck_settle = max(0.0, float(self.args.get("duck_settle_seconds", 0.7)))
         self._poll = 0.15
 
         self.dry_run = bool(self.args.get("dry_run", False))
@@ -217,20 +222,28 @@ class Announcer(hass.Hass):
                      "" if want_chime else "no ")
             return
 
-        # Capture pre-duck volume/state: Sonos won't restore volume via
-        # sonos.restore when nothing was playing at snapshot time, so we undo
-        # the duck ourselves in that case (otherwise the speaker is left quiet).
+        # Capture pre-duck volume/state. If nothing is playing there is nothing
+        # to snapshot/restore -- and worse, sonos.restore of an idle snapshot
+        # reasserts the *ducked* volume asynchronously, racing (and beating) any
+        # volume we set afterwards. So when idle we skip snapshot/restore and
+        # simply undo the duck ourselves; when something IS playing we snapshot
+        # and let sonos.restore put back audio + volume.
         pre_volume = {s: self._safe_float(
             self.get_state(s, attribute="volume_level")) for s in speakers}
-        pre_playing = self.get_state(primary) == "playing"
+        pre_playing = self.get_state(primary) in ("playing", "paused", "buffering")
 
-        # 1) snapshot the current audio (whole group)
-        self.call_service("sonos/snapshot", entity_id=speakers,
-                          with_group=self.duck_with_group)
+        # 1) snapshot the current audio (whole group) -- only if something plays
+        if pre_playing:
+            self.call_service("sonos/snapshot", entity_id=speakers,
+                              with_group=self.duck_with_group)
+            if self.duck_settle:  # let snapshot capture the true (un-ducked) volume
+                time.sleep(self.duck_settle)
         try:
             # 2) duck to the announcement volume
             self.call_service("media_player/volume_set", entity_id=speakers,
                               volume_level=volume)
+            if self.duck_settle:  # ensure the duck lands before any audio plays
+                time.sleep(self.duck_settle)
 
             # 3) optional chime (failure is non-fatal -- still speak)
             if want_chime and self.chime_url:
@@ -243,18 +256,17 @@ class Announcer(hass.Hass):
                               message=req["message"], cache=self.tts_cache)
             self._wait_for_clip(primary, baseline, self.announce_timeout)
         finally:
-            # 5) restore exactly what was playing before
+            # 5) restore what was playing, or just undo the duck if idle
             if self.settle_seconds:
                 time.sleep(self.settle_seconds)
-            try:
-                self.call_service("sonos/restore", entity_id=speakers,
-                                  with_group=self.duck_with_group)
-            except Exception as exc:  # noqa: BLE001
-                self.log("sonos.restore failed for %s: %s",
-                         primary, exc, level="ERROR")
-            # sonos.restore doesn't reset volume when nothing was playing;
-            # re-apply the pre-duck volume so we never leave the speaker quiet.
-            if not pre_playing:
+            if pre_playing:
+                try:
+                    self.call_service("sonos/restore", entity_id=speakers,
+                                      with_group=self.duck_with_group)
+                except Exception as exc:  # noqa: BLE001
+                    self.log("sonos.restore failed for %s: %s",
+                             primary, exc, level="ERROR")
+            else:
                 for spk, vol in pre_volume.items():
                     if vol is not None:
                         self.call_service("media_player/volume_set",
