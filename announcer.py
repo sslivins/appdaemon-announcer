@@ -65,7 +65,7 @@ class Announcer(hass.Hass):
         self.tts_cache = bool(tts.get("cache", True))
 
         # --- Timing safety caps (no fixed announcement delay) --------------
-        self.start_timeout = float(self.args.get("start_timeout", 6))
+        self.start_timeout = float(self.args.get("start_timeout", 15))
         self.announce_timeout = float(self.args.get("announce_timeout", 45))
         self.settle_seconds = max(0.0, float(self.args.get("settle_seconds", 0.3)))
         self._poll = 0.15
@@ -217,6 +217,13 @@ class Announcer(hass.Hass):
                      "" if want_chime else "no ")
             return
 
+        # Capture pre-duck volume/state: Sonos won't restore volume via
+        # sonos.restore when nothing was playing at snapshot time, so we undo
+        # the duck ourselves in that case (otherwise the speaker is left quiet).
+        pre_volume = {s: self._safe_float(
+            self.get_state(s, attribute="volume_level")) for s in speakers}
+        pre_playing = self.get_state(primary) == "playing"
+
         # 1) snapshot the current audio (whole group)
         self.call_service("sonos/snapshot", entity_id=speakers,
                           with_group=self.duck_with_group)
@@ -245,6 +252,13 @@ class Announcer(hass.Hass):
             except Exception as exc:  # noqa: BLE001
                 self.log("sonos.restore failed for %s: %s",
                          primary, exc, level="ERROR")
+            # sonos.restore doesn't reset volume when nothing was playing;
+            # re-apply the pre-duck volume so we never leave the speaker quiet.
+            if not pre_playing:
+                for spk, vol in pre_volume.items():
+                    if vol is not None:
+                        self.call_service("media_player/volume_set",
+                                          entity_id=spk, volume_level=vol)
 
     def _play_chime(self, speakers, primary, base_volume):
         chime_vol = self.chime_volume if self.chime_volume is not None else base_volume

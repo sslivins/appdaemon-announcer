@@ -22,7 +22,9 @@ announcer:
   # Safety caps only -- there is NO hand-tuned announcement delay. The app
   # restores audio the instant the speaker actually stops playing; these just
   # bound how long it will ever wait.
-  start_timeout: 6       # max seconds to wait for playback to *begin*
+  start_timeout: 15      # max seconds to wait for playback to *begin*
+                         # (TTS cloud synthesis of an uncached message can take
+                         # several seconds; we break as soon as it starts)
   announce_timeout: 45   # hard cap on a single spoken message
   settle_seconds: 0.4    # brief pause before restore so Sonos settles
 
