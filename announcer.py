@@ -224,11 +224,11 @@ class Announcer(hass.Hass):
         if volume is None:
             volume = self.qh_volume if quiet else self.announce_volume
 
-        want_chime = req["chime"]
-        if want_chime is None:
-            want_chime = self.chime_enabled
+        want_chime, chime_url, chime_type, chime_volume = self._resolve_chime(
+            req.get("chime"))
         if quiet and self.qh_skip_chime:
             want_chime = False
+        want_chime = bool(want_chime and chime_url)
 
         primary = speakers[0]
         self.log("Announcing '%s' on %s (vol=%.2f chime=%s quiet=%s): %s",
@@ -241,12 +241,46 @@ class Announcer(hass.Hass):
             return
 
         if self.duck_mode == "overlay":
-            self._announce_overlay(speakers, req["message"], volume, want_chime)
+            self._announce_overlay(speakers, req["message"], volume, want_chime,
+                                   chime_url, chime_type)
         else:
             self._announce_snapshot(speakers, primary, req["message"], volume,
-                                    want_chime)
+                                    want_chime, chime_url, chime_type,
+                                    chime_volume)
 
-    def _announce_overlay(self, speakers, message, volume, want_chime):
+    def _resolve_chime(self, req_chime):
+        """Resolve a per-request chime override -> (enabled, url, type, volume).
+
+        The chime for a given announcement can be overridden per config-event or
+        per ``announcer.say`` call so different triggers use different sounds
+        (e.g. a mellow laundry chime vs. a ding-dong doorbell). ``req_chime`` may
+        be:
+
+        * ``None``  - use the configured default (enabled flag + default url);
+        * ``False`` - no chime;
+        * ``True``  - the default chime url;
+        * ``str``   - that ``media_url`` (implies enabled), default type/volume;
+        * ``dict``  - ``{media_url, media_content_type, volume, enabled}`` (any
+          key omitted falls back to the configured default).
+        """
+        url, ctype, volume = self.chime_url, self.chime_type, self.chime_volume
+        if req_chime is None:
+            enabled = self.chime_enabled
+        elif isinstance(req_chime, bool):
+            enabled = req_chime
+        elif isinstance(req_chime, str):
+            enabled, url = True, req_chime
+        elif isinstance(req_chime, dict):
+            enabled = bool(req_chime.get("enabled", True))
+            url = req_chime.get("media_url", url)
+            ctype = req_chime.get("media_content_type", ctype)
+            volume = req_chime.get("volume", volume)
+        else:
+            enabled = self.chime_enabled
+        return enabled, url, ctype, volume
+
+    def _announce_overlay(self, speakers, message, volume, want_chime,
+                          chime_url, chime_type):
         """Sonos native audio-clip overlay: music keeps playing, auto-ducked.
 
         Fires the chime then the TTS as ``announce`` clips. Sonos ducks whatever
@@ -257,8 +291,8 @@ class Announcer(hass.Hass):
         (the chime's known length) keeps the voice from stepping on the chime.
         """
         vol_pct = int(round(max(0.0, min(1.0, volume)) * 100))
-        if want_chime and self.chime_url:
-            self._play_overlay(speakers, self.chime_url, self.chime_type, vol_pct)
+        if want_chime and chime_url:
+            self._play_overlay(speakers, chime_url, chime_type, vol_pct)
             if self.overlay_gap and not self._stopping:
                 time.sleep(self.overlay_gap)
         if self._stopping:
@@ -287,7 +321,8 @@ class Announcer(hass.Hass):
             uri += "&voice=%s" % quote(self.tts_voice)
         return uri
 
-    def _announce_snapshot(self, speakers, primary, message, volume, want_chime):
+    def _announce_snapshot(self, speakers, primary, message, volume, want_chime,
+                           chime_url, chime_type, chime_volume):
         """Legacy path: stop the music, speak, then restore it.
 
         Works on any media_player (not just Sonos), but the music halts for the
@@ -316,8 +351,9 @@ class Announcer(hass.Hass):
             self._set_volume(speakers, volume)
 
             # 3) optional chime (failure is non-fatal -- still speak)
-            if want_chime and self.chime_url:
-                self._play_chime(speakers, primary, volume)
+            if want_chime and chime_url:
+                self._play_chime(speakers, primary, volume, chime_url,
+                                 chime_type, chime_volume)
 
             # 4) speak, then wait for playback to ACTUALLY finish
             baseline = self._media_signature(primary)
@@ -341,15 +377,16 @@ class Announcer(hass.Hass):
                     if vol is not None:
                         self._set_volume(spk, vol)
 
-    def _play_chime(self, speakers, primary, base_volume):
-        chime_vol = self.chime_volume if self.chime_volume is not None else base_volume
+    def _play_chime(self, speakers, primary, base_volume, chime_url, chime_type,
+                    chime_volume):
+        chime_vol = chime_volume if chime_volume is not None else base_volume
         try:
             if chime_vol != base_volume:
                 self._set_volume(speakers, chime_vol)
             baseline = self._media_signature(primary)
             self.call_service("media_player/play_media", entity_id=speakers,
-                              media_content_id=self.chime_url,
-                              media_content_type=self.chime_type)
+                              media_content_id=chime_url,
+                              media_content_type=chime_type)
             self._wait_for_clip(primary, baseline, self.chime_timeout)
         except Exception as exc:  # noqa: BLE001
             self.log("Chime failed (continuing to speech): %s", exc,
