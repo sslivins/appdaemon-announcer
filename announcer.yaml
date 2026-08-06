@@ -15,30 +15,38 @@ announcer:
   duck_with_group: true
 
   # ======================================================================
+  # Ducking strategy
+  # ======================================================================
+  # overlay  (recommended, Sonos-only): plays the chime + voice as native Sonos
+  #          "audio clips". The music KEEPS PLAYING and is automatically ducked
+  #          under the announcement, then restored -- no snapshot, no volume
+  #          juggling, no waiting. Fast and glitch-free.
+  # snapshot (legacy, any media_player): snapshot -> lower volume -> play (this
+  #          STOPS the music) -> wait for playback to finish -> restore. Use
+  #          only for non-Sonos speakers.
+  duck_mode: overlay
+
+  # ======================================================================
   # Volume + timing
   # ======================================================================
-  # Volume used while speaking a normal (non-quiet-hours) announcement.
+  # Announcement (clip) volume, 0-1. In overlay mode this is the chime/voice
+  # clip volume; the music's own volume is left untouched.
   announce_volume: 0.5
-  # Safety caps only -- there is NO hand-tuned announcement delay. The app
-  # restores audio the instant the speaker actually stops playing; these just
-  # bound how long it will ever wait.
+  # overlay mode: fixed gap between the chime clip and the voice clip so the
+  # voice doesn't step on the chime (the chime length is known, so this is
+  # deterministic spacing -- NOT a guess at speech length).
+  overlay_gap_seconds: 1.6
+  # --- snapshot-mode-only safety caps (ignored in overlay mode) ---------
   start_timeout: 15      # max seconds to wait for playback to *begin*
-                         # (TTS cloud synthesis of an uncached message can take
-                         # several seconds; we break as soon as it starts)
   announce_timeout: 45   # hard cap on a single spoken message
   settle_seconds: 0.4    # brief pause before restore so Sonos settles
   duck_settle_seconds: 0.7  # MAX wait for an async volume_set to be confirmed
-                            # by HA before proceeding (we poll and continue as
-                            # soon as the new level is reported -- usually well
-                            # under this). Ensures the duck lands before audio
-                            # plays and the snapshot captures the true volume;
-                            # this is what the old HA automation's 1s delay did.
+                            # by HA before proceeding (poll, continue as soon as
+                            # the new level is reported).
 
   # ======================================================================
   # Chime (played BEFORE the spoken text)
   # ======================================================================
-  # The app waits for the chime to finish, then speaks -- no fixed gap. A chime
-  # failure (e.g. unreachable URL) is non-fatal: it logs and still speaks.
   # `media_url` can be a Home Assistant media-source id (resolved by HA for the
   # Sonos), a same-LAN HA `/local/...` URL, or any public https URL.
   # The bundled chime.wav was uploaded to HA local media
@@ -47,8 +55,8 @@ announcer:
     enabled: true
     media_url: "media-source://media_source/local/chime.wav"
     media_content_type: music
-    # volume: 0.5          # optional; defaults to announce_volume
-    timeout: 10            # max seconds to wait for the chime to finish
+    # volume: 0.5          # optional; snapshot mode only
+    timeout: 10            # snapshot mode only: max wait for the chime
 
   # ======================================================================
   # Text-to-speech
@@ -56,6 +64,11 @@ announcer:
   tts:
     engine: tts.home_assistant_cloud
     cache: true
+    # Voice for the HA Cloud engine (Azure neural voices). AvaNeural is a clear,
+    # natural female voice. Browse others in HA: Developer Tools > Actions >
+    # tts.speak, or query tts/engine/voices. Omit to use the engine default.
+    voice: AvaNeural
+    # language: en-US      # optional; defaults to the engine's default
 
   # ======================================================================
   # Quiet hours

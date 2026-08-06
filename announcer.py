@@ -21,6 +21,7 @@ import queue
 import threading
 import time
 from datetime import datetime, time as _dtime
+from urllib.parse import quote
 
 import appdaemon.plugins.hass.hassapi as hass
 
@@ -48,6 +49,15 @@ class Announcer(hass.Hass):
         self.speakers = _as_list(self.args.get("speakers"))
         self.duck_with_group = bool(self.args.get("duck_with_group", True))
 
+        # --- Ducking strategy ----------------------------------------------
+        # overlay  -> Sonos native audio-clip: the music keeps playing and is
+        #             auto-ducked under the chime/voice, then auto-restored. No
+        #             snapshot/restore or volume juggling needed (Sonos only).
+        # snapshot -> legacy: snapshot -> lower volume -> play (stops the music)
+        #             -> wait for playback to finish -> restore. Works on any
+        #             media_player but the music halts during the announcement.
+        self.duck_mode = str(self.args.get("duck_mode", "overlay")).lower()
+
         # --- Volume --------------------------------------------------------
         self.announce_volume = float(self.args.get("announce_volume", 0.5))
 
@@ -63,6 +73,8 @@ class Announcer(hass.Hass):
         tts = self.args.get("tts", {}) or {}
         self.tts_engine = tts.get("engine", "tts.home_assistant_cloud")
         self.tts_cache = bool(tts.get("cache", True))
+        self.tts_voice = tts.get("voice")        # e.g. AvaNeural (None -> default)
+        self.tts_language = tts.get("language")  # e.g. en-US (None -> engine default)
 
         # --- Timing safety caps (no fixed announcement delay) --------------
         self.start_timeout = float(self.args.get("start_timeout", 15))
@@ -73,6 +85,10 @@ class Announcer(hass.Hass):
         # snapshot captures the already-ducked volume (matches the 1s delay the
         # old HA automation needed).
         self.duck_settle = max(0.0, float(self.args.get("duck_settle_seconds", 0.7)))
+        # Overlay mode: gap between firing the chime clip and the voice clip so
+        # the chime isn't cut off. The chime length is known/fixed, so this is a
+        # deterministic spacing, NOT a guess at speech length.
+        self.overlay_gap = max(0.0, float(self.args.get("overlay_gap_seconds", 1.6)))
         self._poll = 0.15
 
         self.dry_run = bool(self.args.get("dry_run", False))
@@ -109,10 +125,13 @@ class Announcer(hass.Hass):
         self.listen_event(self._on_say_event, self.say_event)
 
         self.log(
-            "Announcer initialised: %d speaker(s), %d trigger(s), chime=%s, "
-            "quiet_hours=%s, say_event=%s, dry_run=%s",
+            "Announcer initialised: %d speaker(s), %d trigger(s), mode=%s, "
+            "engine=%s%s, chime=%s, quiet_hours=%s, say_event=%s, dry_run=%s",
             len(self.speakers),
             n_triggers,
+            self.duck_mode,
+            self.tts_engine,
+            ("/%s" % self.tts_voice) if self.tts_voice else "",
             self.chime_enabled,
             ("%s-%s/%s" % (qh.get("start"), qh.get("end"), self.qh_mode)
              if self.qh_start and self.qh_end else "off"),
@@ -217,11 +236,63 @@ class Announcer(hass.Hass):
                  req["message"])
 
         if self.dry_run:
-            self.log("[dry_run] would snapshot -> duck -> "
-                     "%schime -> speak -> restore",
-                     "" if want_chime else "no ")
+            self.log("[dry_run:%s] would %splay chime -> speak on %s",
+                     self.duck_mode, "" if want_chime else "no ", primary)
             return
 
+        if self.duck_mode == "overlay":
+            self._announce_overlay(speakers, req["message"], volume, want_chime)
+        else:
+            self._announce_snapshot(speakers, primary, req["message"], volume,
+                                    want_chime)
+
+    def _announce_overlay(self, speakers, message, volume, want_chime):
+        """Sonos native audio-clip overlay: music keeps playing, auto-ducked.
+
+        Fires the chime then the TTS as ``announce`` clips. Sonos ducks whatever
+        is currently playing under each clip and restores it automatically, so
+        there is nothing to snapshot, wait for, or restore -- and no volume race.
+        ``volume`` (0-1) sets the clip volume; the music's own volume is left
+        untouched. The two clips queue on Sonos; the short, fixed ``overlay_gap``
+        (the chime's known length) keeps the voice from stepping on the chime.
+        """
+        vol_pct = int(round(max(0.0, min(1.0, volume)) * 100))
+        if want_chime and self.chime_url:
+            self._play_overlay(speakers, self.chime_url, self.chime_type, vol_pct)
+            if self.overlay_gap and not self._stopping:
+                time.sleep(self.overlay_gap)
+        if self._stopping:
+            return
+        self._play_overlay(speakers, self._tts_media_uri(message), "music",
+                           vol_pct)
+
+    def _play_overlay(self, speakers, media_content_id, media_content_type,
+                      vol_pct):
+        self.call_service("media_player/play_media", entity_id=speakers,
+                          media_content_id=media_content_id,
+                          media_content_type=media_content_type,
+                          announce=True, extra={"volume": vol_pct})
+
+    def _tts_media_uri(self, message):
+        """Build a media-source TTS URI (HA resolves it to a cached proxy URL).
+
+        Passing the voice/language as query options lets the overlay path pick a
+        specific engine voice (e.g. AvaNeural) without a separate tts.speak call.
+        """
+        uri = "media-source://tts/%s?message=%s" % (self.tts_engine,
+                                                    quote(message))
+        if self.tts_language:
+            uri += "&language=%s" % quote(self.tts_language)
+        if self.tts_voice:
+            uri += "&voice=%s" % quote(self.tts_voice)
+        return uri
+
+    def _announce_snapshot(self, speakers, primary, message, volume, want_chime):
+        """Legacy path: stop the music, speak, then restore it.
+
+        Works on any media_player (not just Sonos), but the music halts for the
+        duration of the announcement.
+        """
         # Capture pre-duck volume/state. If nothing is playing there is nothing
         # to snapshot/restore -- and worse, sonos.restore of an idle snapshot
         # reasserts the *ducked* volume asynchronously, racing (and beating) any
@@ -252,7 +323,7 @@ class Announcer(hass.Hass):
             baseline = self._media_signature(primary)
             self.call_service("tts/speak", entity_id=self.tts_engine,
                               media_player_entity_id=speakers,
-                              message=req["message"], cache=self.tts_cache)
+                              message=message, cache=self.tts_cache)
             self._wait_for_clip(primary, baseline, self.announce_timeout)
         finally:
             # 5) restore what was playing, or just undo the duck if idle
